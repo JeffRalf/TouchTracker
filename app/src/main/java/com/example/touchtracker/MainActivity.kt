@@ -1,6 +1,7 @@
 package com.example.touchtracker
 
 import android.os.Bundle
+
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,20 +12,34 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.lifecycleScope
+
 import com.example.touchtracker.network.SocketManager
 import com.example.touchtracker.ui.theme.TouchTrackerTheme
+import com.example.touchtracker.file.File
+
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
+import java.io.BufferedWriter
+import java.io.IOException
+import java.io.OutputStream
+import java.io.OutputStreamWriter
+import java.io.PrintWriter
+
+import java.net.InetSocketAddress
+import java.net.Socket
 
 class MainActivity : ComponentActivity() {
-    private val socketManager = SocketManager("192.168.1.40", 5000)
-    private var connected by mutableStateOf(false)
+    private var socket: Socket = Socket()
+    private var file: File = File()
+    private var connected: Boolean = false
     private var pointerPosition by mutableStateOf(Offset.Zero)
 
 
@@ -42,17 +57,14 @@ class MainActivity : ComponentActivity() {
                     content = {
                         Greeting("Android", modifier = Modifier.pointerInput(Unit) {
                             coroutineScope {
-                                launch (exceptionHandler) {
+                                launch (Dispatchers.IO + exceptionHandler) {
+                                    serverSender()
                                     awaitPointerEventScope {
                                         while (true) {
                                             val event = awaitPointerEvent()
                                             if (event.changes.any { it.position != null }) {
-                                                if (!connected) {
-                                                    connectToServer()
-                                                    println("I'm called once")
-                                                }
                                                 pointerPosition = event.changes.first { it.position != null }.position
-                                                sendCoordinates(pointerPosition)
+                                                file.enqueue(pointerPosition.x, pointerPosition.y)
                                             }
                                         }
                                     }
@@ -65,28 +77,60 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun connectToServer() {
-        lifecycleScope.launch(Dispatchers.Default + exceptionHandler) {
-            socketManager.connect()
-            connected = true
+    private fun establishConnection(message: String?) {
+        if (message == "Broken pipe") {
+            socket = Socket()
+        }
+        while (!connected) {
+            try {
+                socket.connect(InetSocketAddress("192.168.1.40", 5000), 5000)
+                connected = true
+                println("Connexion réussie")
+            } catch (e: IOException) {
+                println("Erreur de connexion : ${e.message}")
+                // Attendez un moment avant de réessayer
+                if (e.message == "already connected") {
+                    connected = true
+                }
+                else if (e.message == "Socket closed") {
+                    socket = Socket()
+                }
+                else {
+                    Thread.sleep(1000)
+                }
+            }
         }
     }
 
-    private fun sendCoordinates(position: Offset) {
-        println("wesh")
+    private fun serverSender() {
         lifecycleScope.launch(Dispatchers.Default + exceptionHandler) {
-            println("Weesh")
-            socketManager.sendCoordinates(position.x, position.y)
+            while (true) {
+                if (!connected) {
+                    establishConnection(null)
+                }
+                file.dequeue()?.let {couple ->
+                    println("ikusooooo")
+                    sendCoordinates(couple.first, couple.second)
+                }
+            }
+        }
+    }
+    private fun sendCoordinates(x: Float, y: Float) {
+        socket?.let { socket ->
+            val outputStream: OutputStream = socket.getOutputStream()
+            val writer = BufferedWriter(OutputStreamWriter(outputStream))
+
+            try {
+                writer.write("$x,$y\n")
+                writer.flush()
+            } catch (e: IOException) {
+                connected = false
+                println("Erreur lors de l'envoi des coordonnées : ${e.message}")
+                establishConnection(e.message)
+            }
         }
     }
 
-    override fun onDestroy() {
-        lifecycleScope.launch(Dispatchers.Default + exceptionHandler) {
-            socketManager.disconnect()
-            connected = false
-        }
-        super.onDestroy()
-    }
 }
 @Composable
 fun Greeting(name: String, modifier: Modifier = Modifier) {
